@@ -32,6 +32,8 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -68,7 +70,7 @@ sema_down (struct semaphore *sema)
   old_level = intr_disable ();
   while (sema->value == 0) 
     {
-      list_push_back (&sema->waiters, &thread_current ()->elem);
+      list_insert_ordered (&sema->waiters, &thread_current ()->elem, thread_cmp_priority, NULL);
       thread_block ();
     }
   sema->value--;
@@ -109,15 +111,29 @@ void
 sema_up (struct semaphore *sema) 
 {
   enum intr_level old_level;
-
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
+  
+  struct thread *awoken_thread = NULL;
+  
+  /* Kuyrukta bekleyen varsa rütbeye göre sırala ve en büyüğünü uyandır */
   if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                struct thread, elem));
+    {
+      list_sort (&sema->waiters, thread_cmp_priority, NULL);
+      awoken_thread = list_entry (list_pop_front (&sema->waiters), struct thread, elem);
+      thread_unblock (awoken_thread);
+    }
+    
   sema->value++;
   intr_set_level (old_level);
+
+  /* PREEMPTION (YOL VERME) EKLENTİSİ: 
+     Eğer uyandırdığımız askerin rütbesi bizden yüksekse, hemen işlemciyi ona sal! */
+  if (awoken_thread != NULL && awoken_thread->priority > thread_current ()->priority && !intr_context ())
+    {
+      thread_yield ();
+    }
 }
 
 static void sema_test_helper (void *sema_);
@@ -196,8 +212,25 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
-  sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+  struct thread *cur = thread_current ();
+
+  if (lock->holder != NULL) 
+    {
+      /* Kapı dolu! Hangi kapıda beklediğimizi kaydediyoruz */
+      cur->wait_on_lock = lock;
+      
+      /* İçerideki askerin bağış listesine kendi ismimizi yazdırıyoruz */
+      list_insert_ordered (&lock->holder->donations, &cur->donation_elem, thread_cmp_donate_priority, NULL);
+      
+      /* Ve rütbemizi ona bağışlıyoruz */
+      thread_donate_priority ();
+    }
+
+  sema_down (&lock->semaphore); /* Kapının açılmasını bekle */
+  
+  /* Kapı açıldı, içeri girdik! Artık kapıyı biz tutuyoruz */
+  cur->wait_on_lock = NULL;
+  lock->holder = cur;
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -220,6 +253,8 @@ lock_try_acquire (struct lock *lock)
   return success;
 }
 
+
+
 /* Releases LOCK, which must be owned by the current thread.
 
    An interrupt handler cannot acquire a lock, so it does not
@@ -231,8 +266,25 @@ lock_release (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
-  lock->holder = NULL;
-  sema_up (&lock->semaphore);
+  struct thread *cur = thread_current ();
+  struct list_elem *e;
+
+  /* Bu kilidi bekleyenleri (sadece bu kapıdakileri) bağış listemizden çıkarıyoruz */
+  for (e = list_begin (&cur->donations); e != list_end (&cur->donations); )
+    {
+      struct thread *t = list_entry (e, struct thread, donation_elem);
+      if (t->wait_on_lock == lock)
+        e = list_remove (e);
+      else
+        e = list_next (e);
+    }
+
+  lock->holder = NULL; /* Kilidi bıraktık */
+  
+  /* Rütbemizi aslına döndür (veya elimizdeki diğer kilitlerin bağışlarına göre güncelle) */
+  thread_update_priority (); 
+
+  sema_up (&lock->semaphore); /* Kapıyı sonrakine aç */
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -308,6 +360,19 @@ cond_wait (struct condition *cond, struct lock *lock)
    An interrupt handler cannot acquire a lock, so it does not
    make sense to try to signal a condition variable within an
    interrupt handler. */
+   /* Koşul değişkeninde bekleyenlerin önceliğini kıyaslar */
+static bool
+cond_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  struct semaphore_elem *sa = list_entry (a, struct semaphore_elem, elem);
+  struct semaphore_elem *sb = list_entry (b, struct semaphore_elem, elem);
+  
+  /* Semaforların içindeki en yüksek öncelikli thread'leri kıyasla */
+  struct thread *ta = list_entry (list_begin (&sa->semaphore.waiters), struct thread, elem);
+  struct thread *tb = list_entry (list_begin (&sb->semaphore.waiters), struct thread, elem);
+  
+  return ta->priority > tb->priority;
+}
 void
 cond_signal (struct condition *cond, struct lock *lock UNUSED) 
 {
@@ -316,9 +381,15 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED)
   ASSERT (!intr_context ());
   ASSERT (lock_held_by_current_thread (lock));
 
-  if (!list_empty (&cond->waiters)) 
-    sema_up (&list_entry (list_pop_front (&cond->waiters),
-                          struct semaphore_elem, elem)->semaphore);
+if (!list_empty (&cond->waiters)) 
+    {
+      /* Önce listeyi rütbeye göre sırala */
+      list_sort (&cond->waiters, cond_cmp_priority, NULL);
+      
+      /* Sonra en yüksek rütbeliyi uyandır */
+      sema_up (&list_entry (list_pop_front (&cond->waiters),
+                            struct semaphore_elem, elem)->semaphore);
+    }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by

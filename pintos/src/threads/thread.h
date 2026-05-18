@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 
+struct lock;
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -88,7 +89,11 @@ struct thread
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
+    int priority;
+    int base_priority;                  /* Thread'in kendi orijinal rütbesi */
+    struct list donations;              /* Bize rütbe bağışlayanların (bekleyenlerin) listesi */
+    struct list_elem donation_elem;     /* Başkasının bağış listesine girmek için kullanacağımız eleman */
+    struct lock *wait_on_lock;          /* Şu an açılmasını beklediğimiz kapı (kilit) */                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
@@ -140,5 +145,9 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 void thread_sleep(int64_t ticks);
 void thread_awake(int64_t ticks);
+bool thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux);
+bool thread_cmp_donate_priority (const struct list_elem *a, const struct list_elem *b, void *aux);
+void thread_update_priority (void);
+void thread_donate_priority (void);
 
 #endif /* threads/thread.h */

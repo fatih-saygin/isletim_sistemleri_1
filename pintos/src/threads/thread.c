@@ -20,6 +20,7 @@
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
 
+bool thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux);
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
@@ -38,6 +39,23 @@ static struct thread *initial_thread;
 
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
+
+/* İki thread'in önceliğini kıyaslayan yardımcı fonksiyon */
+bool 
+thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) 
+{
+  struct thread *ta = list_entry (a, struct thread, elem);
+  struct thread *tb = list_entry (b, struct thread, elem);
+  return ta->priority > tb->priority;
+}
+/* Bağış listesindeki thread'leri rütbesine göre kıyaslar */
+bool 
+thread_cmp_donate_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) 
+{
+  struct thread *ta = list_entry (a, struct thread, donation_elem);
+  struct thread *tb = list_entry (b, struct thread, donation_elem);
+  return ta->priority > tb->priority;
+}
 
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
@@ -112,6 +130,7 @@ thread_start (void)
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
   thread_create ("idle", PRI_MIN, idle, &idle_started);
+
 
   /* Start preemptive thread scheduling. */
   intr_enable ();
@@ -204,6 +223,12 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+  /* Yeni oluşturulan thread'in önceliği benimkinden yüksekse işlemciyi ona sal */
+  if (thread_current ()->priority < priority) 
+    {
+      thread_yield ();
+    }
+
   return tid;
 }
 
@@ -240,7 +265,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered (&ready_list, &t->elem, thread_cmp_priority, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -311,7 +336,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered (&ready_list, &cur->elem, thread_cmp_priority, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -334,13 +359,20 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  struct thread *cur = thread_current ();
+  
+  /* 1. Sadece askerin kendi "gerçek" rütbesini güncelliyoruz */
+  cur->base_priority = new_priority;
+  
+  /* 2. Askerin elindeki emanet rütbelerle yeni rütbesini kıyaslayıp geçerli olanı belirliyoruz */
+  thread_update_priority ();
+  
+  /* 3. Belki rütbesi düştü ve artık en yetkili o değil, işlemciyi test için bırakıyoruz */
+  thread_yield ();
 }
-
 /* Returns the current thread's priority. */
 int
 thread_get_priority (void) 
@@ -465,6 +497,9 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->base_priority = priority;
+  list_init (&t->donations);
+  t->wait_on_lock = NULL;
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
@@ -622,6 +657,49 @@ void thread_awake (int64_t ticks)
         }
     }
 }
+/* Askerin kendi rütbesini, kendisine bağış yapanlara bakarak günceller (Emaneti iade etme) */
+void 
+thread_update_priority (void) 
+{
+  struct thread *cur = thread_current ();
+  cur->priority = cur->base_priority; /* Önce kendi orijinal rütbesine döner */
+
+  if (!list_empty (&cur->donations)) 
+    {
+      /* Bağış listesini rütbeye göre sırala ve en yüksek olanı al */
+      list_sort (&cur->donations, thread_cmp_donate_priority, NULL);
+      struct thread *highest_donor = list_entry (list_front (&cur->donations), struct thread, donation_elem);
+      
+      /* Eğer bağışlayanın rütbesi benimkinden büyükse, onun rütbesini kuşan */
+      if (highest_donor->priority > cur->priority)
+        cur->priority = highest_donor->priority;
+    }
+}
+
+/* Kapıda bekleyen askerin rütbesini içeridekine (veya zincirleme olarak ondan sonrakilere) bağışlaması */
+void 
+thread_donate_priority (void) 
+{
+  int depth = 0;
+  struct thread *cur = thread_current ();
+  struct lock *lock = cur->wait_on_lock;
+
+  /* İşletim sistemi çökmek üzereyken (nested locks) zincirleme rütbe bağışını 8 seviyeyle sınırlandırıyoruz */
+  while (lock != NULL && depth < 8) 
+    {
+      struct thread *holder = lock->holder;
+      if (holder == NULL) return;
+
+      /* Eğer benim rütbem içeridekinden yüksekse, rütbemi ona veriyorum */
+      if (holder->priority < cur->priority)
+        holder->priority = cur->priority;
+      
+      lock = holder->wait_on_lock;
+      depth++;
+    }
+}
+
+
 
 
 /* Offset of `stack' member within `struct thread'.
