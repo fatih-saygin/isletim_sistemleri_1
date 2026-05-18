@@ -24,7 +24,6 @@
    that are ready to run but not actually running. */
 static struct list ready_list;
 
-/* List of sleeping processes. */
 static struct list sleep_list;
 
 /* List of all processes.  Processes are added to this list
@@ -94,7 +93,6 @@ thread_init (void)
 
   lock_init (&tid_lock);
   list_init (&ready_list);
-  list_init (&sleep_list);
   list_init (&all_list);
 
   /* Set up a thread structure for the running thread. */
@@ -102,6 +100,7 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  list_init (&sleep_list);
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -466,7 +465,6 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
-  t->ticks_to_wake = 0;
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
@@ -584,33 +582,40 @@ allocate_tid (void)
   return tid;
 }
 
-/* Offset of `stack' member within `struct thread'.
-   Used by switch.S, which can't figure it out on its own. */
-void
-thread_sleep (int64_t wake_ticks)
+
+void thread_sleep (int64_t ticks) 
 {
-  struct thread *cur = thread_current ();
+  struct thread *curr = thread_current ();
   enum intr_level old_level;
+
+  /* Interrupt (kesme) içinde uyuma işlemi yapılamaz, kontrol ediyoruz */
   ASSERT (!intr_context ());
+
+  /* Listeye eklerken araya başka işlem girmesin diye kesmeleri kapatıyoruz */
   old_level = intr_disable ();
-  cur->ticks_to_wake = wake_ticks;
-  list_push_back (&sleep_list, &cur->elem);
-  thread_block ();
+  
+  curr->wake_up_ticks = ticks;
+  list_push_back (&sleep_list, &curr->elem);
+  thread_block (); /* Thread'i uyutuyoruz */
+  
+  /* Kesmeleri eski haline geri getiriyoruz */
   intr_set_level (old_level);
 }
 
-void
-thread_wakeup (int64_t current_ticks)
+void thread_awake (int64_t ticks) 
 {
   struct list_elem *e = list_begin (&sleep_list);
-  while (e != list_end (&sleep_list))
+  
+  while (e != list_end (&sleep_list)) 
     {
       struct thread *t = list_entry (e, struct thread, elem);
-      if (current_ticks >= t->ticks_to_wake)
+      
+      /* Thread'in uyanma zamanı geldiyse veya geçtiyse */
+      if (t->wake_up_ticks <= ticks) 
         {
-          e = list_remove (e);
-          thread_unblock (t);
-        }
+          e = list_remove (e); /* Listeden çıkar */
+          thread_unblock (t);  /* Hazır kuyruğuna (ready_list) geri koy */
+        } 
       else 
         {
           e = list_next (e);
@@ -618,4 +623,7 @@ thread_wakeup (int64_t current_ticks)
     }
 }
 
+
+/* Offset of `stack' member within `struct thread'.
+   Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);

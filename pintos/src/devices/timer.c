@@ -86,14 +86,17 @@ timer_elapsed (int64_t then)
 
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
-void
-timer_sleep (int64_t ticks) 
+void timer_sleep (int64_t ticks) 
 {
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
   
-  if (ticks <= 0) return;
+  /* Eğer bekleme süresi 0 veya negatifse hiç uğraşma */
+  if (ticks <= 0) 
+    return;
+    
+  /* Thread'i uyanması gereken mutlak zamanı vererek uykuya gönderiyoruz */
   thread_sleep (start + ticks);
 }
 
@@ -173,7 +176,7 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
-  thread_wakeup (ticks);
+  thread_awake (ticks); /* EKLENEN SATIR: Uyanması gereken var mı kontrol et */
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer

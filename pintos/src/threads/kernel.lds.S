@@ -23,9 +23,9 @@ SECTIONS
   .plt : { *(.plt*) }
 
   /* BSS (zero-initialized data) is after everything else. */
-  PROVIDE(_start_bss = .);
+  _start_bss = .;
   .bss : { *(.bss) }
-  PROVIDE(_end_bss = .);
+  _end_bss = .;
 
   _end = .;
 
