@@ -1,1 +1,0 @@
-# isletim_sistemleri_1

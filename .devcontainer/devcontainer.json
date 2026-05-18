@@ -1,0 +1,14 @@
+{
+  "name": "Pintos Development Environment",
+  "image": "ubuntu:20.04",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack"
+      ]
+    }
+  },
+  "forwardPorts": [],
+  "postCreateCommand": "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential gdb qemu-system-x86 gcc-i686-linux-gnu git tcsh perl && echo 'Aletler kuruldu.'"
+}
