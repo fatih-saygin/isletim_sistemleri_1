@@ -4,7 +4,9 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
+#include "devices/timer.h"
 #include "threads/flags.h"
+#include "threads/fixed-point.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
 #include "threads/palloc.h"
@@ -79,6 +81,10 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
 
+/* MLFQS scheduler global variables. */
+static fixed_t load_avg;                /* System load average in fixed-point. */
+
+
 static void kernel_thread (thread_func *, void *aux);
 
 static void idle (void *aux UNUSED);
@@ -90,6 +96,11 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+
+/* MLFQS helper functions. */
+static void update_load_avg (void);
+static void update_recent_cpu (void);
+static void recalculate_priority (struct thread *t, void *aux UNUSED);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -146,7 +157,7 @@ thread_tick (void)
 {
   struct thread *t = thread_current ();
 
-  /* Update statistics. */
+  /* İstatistikleri güncelle (Burası standart) */
   if (t == idle_thread)
     idle_ticks++;
 #ifdef USERPROG
@@ -156,7 +167,28 @@ thread_tick (void)
   else
     kernel_ticks++;
 
-  /* Enforce preemption. */
+  /* MLFQS HESAPLAMALARI */
+  if (thread_mlfqs)
+    {
+      /* 1. Her tikte, çalışan askerin (idle değilse) yorgunluğunu (recent_cpu) 1 artır */
+      if (t != idle_thread)
+        t->recent_cpu = FP_ADD_INT(t->recent_cpu, 1);
+
+      /* 2. Her 1 saniyede bir (100 tikte): Yük ortalamasını ve tüm recent_cpu'ları güncelle */
+      if (timer_ticks () % TIMER_FREQ == 0)
+        {
+          update_load_avg ();
+          update_recent_cpu ();
+        }
+      
+      /* 3. Her 4 tikte bir: BÜTÜN askerlerin rütbesini yeniden hesapla */
+      if (timer_ticks () % 4 == 0)
+        {
+          thread_foreach (recalculate_priority, NULL);
+        }
+    }
+
+  /* Zaman dilimi dolduysa işlemciyi sıradakine sal (Enforce preemption) */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 }
@@ -382,35 +414,104 @@ thread_get_priority (void)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice) 
 {
-  /* Not yet implemented. */
+  /* Clamp nice value to range [-20, 20] */
+  if (nice < -20)
+    nice = -20;
+  if (nice > 20)
+    nice = 20;
+  
+  thread_current ()->nice = nice;
+  
+  /* Recalculate priority based on new nice value */
+  thread_update_priority ();
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current ()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FP_ROUND(FP_MUL_INT(load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FP_ROUND(FP_MUL_INT(thread_current ()->recent_cpu, 100));
 }
 
+/* Updates the system load average.
+   Called once every second (every TIMER_FREQ ticks). */
+static void
+update_load_avg (void)
+{
+  int ready_threads = list_size (&ready_list);
+  if (thread_current () != idle_thread)
+    ready_threads++;
+  
+  /* load_avg = (59/60) * load_avg + (1/60) * ready_threads */
+  /* C dilinde tam sayı bölme hatası olmasın diye makroları Pintos'un kurallarına göre diziyoruz: */
+  fixed_t term1 = FP_DIV_INT (FP_MUL_INT (load_avg, 59), 60);
+  fixed_t term2 = FP_DIV_INT (FP_CONST (ready_threads), 60);
+  
+  load_avg = FP_ADD (term1, term2);
+}
+
+/* Updates recent_cpu for all threads.
+   Called once every second (every TIMER_FREQ ticks). */
+static void
+update_recent_cpu (void)
+{
+  struct list_elem *e;
+  
+  for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      
+      if (t != idle_thread)
+        {
+          /* coeff = (2 * load_avg) / (2 * load_avg + 1) */
+          fixed_t two_load = FP_MUL_INT (load_avg, 2);
+          fixed_t coeff = FP_DIV (two_load, FP_ADD_INT (two_load, 1));
+          
+          /* recent_cpu = coeff * recent_cpu + nice */
+          t->recent_cpu = FP_ADD_INT (FP_MUL (coeff, t->recent_cpu), t->nice);
+        }
+    }
+}
+
+/* Recalculates priority for a thread.
+   Priority is based on recent_cpu and nice value.
+   Called periodically or when conditions change. */
+static void
+recalculate_priority (struct thread *t, void *aux UNUSED)
+{
+  int new_priority;
+  
+  if (t != idle_thread)
+    {
+      /* priority = PRI_MAX - (recent_cpu / 4) - (nice * 2) */
+      new_priority = PRI_MAX - FP_INT_PART(FP_DIV_INT(t->recent_cpu, 4)) - (t->nice * 2);
+      
+      /* Clamp priority to valid range */
+      if (new_priority < PRI_MIN)
+        new_priority = PRI_MIN;
+      if (new_priority > PRI_MAX)
+        new_priority = PRI_MAX;
+      
+      t->priority = new_priority;
+    }
+}
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
@@ -500,6 +601,11 @@ init_thread (struct thread *t, const char *name, int priority)
   t->base_priority = priority;
   list_init (&t->donations);
   t->wait_on_lock = NULL;
+  
+  /* MLFQS scheduler initialization. */
+  t->nice = 0;
+  t->recent_cpu = FP_CONST(0);
+  
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
@@ -662,17 +768,27 @@ void
 thread_update_priority (void) 
 {
   struct thread *cur = thread_current ();
-  cur->priority = cur->base_priority; /* Önce kendi orijinal rütbesine döner */
-
-  if (!list_empty (&cur->donations)) 
+  
+  if (thread_mlfqs)
     {
-      /* Bağış listesini rütbeye göre sırala ve en yüksek olanı al */
-      list_sort (&cur->donations, thread_cmp_donate_priority, NULL);
-      struct thread *highest_donor = list_entry (list_front (&cur->donations), struct thread, donation_elem);
-      
-      /* Eğer bağışlayanın rütbesi benimkinden büyükse, onun rütbesini kuşan */
-      if (highest_donor->priority > cur->priority)
-        cur->priority = highest_donor->priority;
+      /* In MLFQS mode, recalculate priority from recent_cpu and nice */
+      recalculate_priority (cur, NULL);
+    }
+  else
+    {
+      /* In priority scheduling mode, use donation-based priority */
+      cur->priority = cur->base_priority; /* Önce kendi orijinal rütbesine döner */
+
+      if (!list_empty (&cur->donations)) 
+        {
+          /* Bağış listesini rütbeye göre sırala ve en yüksek olanı al */
+          list_sort (&cur->donations, thread_cmp_donate_priority, NULL);
+          struct thread *highest_donor = list_entry (list_front (&cur->donations), struct thread, donation_elem);
+          
+          /* Eğer bağışlayanın rütbesi benimkinden büyükse, onun rütbesini kuşan */
+          if (highest_donor->priority > cur->priority)
+            cur->priority = highest_donor->priority;
+        }
     }
 }
 

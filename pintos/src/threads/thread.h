@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/fixed-point.h"
 
 struct lock;
 /* States in a thread's life cycle. */
@@ -95,6 +96,10 @@ struct thread
     struct list_elem donation_elem;     /* Başkasının bağış listesine girmek için kullanacağımız eleman */
     struct lock *wait_on_lock;          /* Şu an açılmasını beklediğimiz kapı (kilit) */                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
+
+    /* MLFQS scheduler fields. */
+    int nice;                           /* Niceness value for MLFQS (-20 to 20). */
+    fixed_t recent_cpu;                 /* Recent CPU time in fixed-point format. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
